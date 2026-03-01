@@ -1,0 +1,9 @@
+{
+  "additionalFiles": "..\\..\\..",
+  "compiler.optimization_flags": "-Os",
+  "customBuildProperties": "",
+  "fqbn": "esp32:esp32:esp32s3:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=4M,PartitionScheme=app3M_fat9M_16MB,DebugLevel=none,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default,ZigbeeMode=default",
+  "hardwareFolders": "C:\\Users\\DELL\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.4,C:\\Users\\DELL\\AppData\\Local\\Arduino15\\packages\\esp32\\hardware\\esp32\\3.3.4",
+  "otherLibrariesFolders": "C:\\Users\\DELL\\OneDrive\\ドキュメント\\Arduino\\libraries",
+  "sketchLocation": "C:\\Users\\DELL\\Desktop\\EduScraper-Device\\EduScraper-MAIN"
+}
