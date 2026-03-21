@@ -1,18 +1,18 @@
 #include <Arduino.h>
-
+#include <TFT_eSPI.h>
 // put function declarations here:
-int myFunction(int, int);
-
+TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
 void setup() {
   // put your setup code here, to run once:
-  int result = myFunction(2, 3);
+  tft.init();
+  tft.setRotation(1);
+  tft.writecommand(0x36);
+  tft.writedata(0x40);
+  tft.fillScreen(TFT_BLACK);
+  tft.setFreeFont(&FreeSansBoldOblique24pt7b);
+  tft.setTextColor(TFT_WHITE);
+  tft.setCursor(0, 50);
+  tft.println("Hello World!");
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
-}
-
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
-}
+void loop() {}
