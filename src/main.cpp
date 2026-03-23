@@ -22,12 +22,17 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 static const uint8_t WIFI_CONNECT_RETRIES = 2;
+static const uint16_t AUDIO_ACTIVE_DELAY_MS = 1;
+static const uint16_t AUDIO_IDLE_DELAY_MS = 20;
+static const uint16_t AUDIO_I2S_IO_TIMEOUT_MS = 5;
+static const uint32_t AUDIO_ERROR_LOG_INTERVAL_MS = 5000;
 static const i2s_port_t AUDIO_I2S_PORT = I2S_NUM_0;
 static const int AUDIO_I2S_BCK_PIN = 9;
 static const int AUDIO_I2S_WS_PIN = 14;
 static const int AUDIO_I2S_DOUT_PIN = 8; // ESP32-S3 -> MAX98357A DIN
 static const int AUDIO_I2S_DIN_PIN = 4;  // INMP441 SD -> ESP32-S3
 static bool audioLoopbackReady = false;
+static int32_t audioLoopbackBuffer[128];
 
 TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
 SafeGithubOTA ota;
@@ -186,6 +191,13 @@ static bool connectWifiWithTimeout() {
   return false;
 }
 
+static bool hasElapsedMs(uint32_t now, uint32_t then, uint32_t intervalMs) {
+  if (now >= then) {
+    return (now - then) >= intervalMs;
+  }
+  return ((UINT32_MAX - then) + now + 1U) >= intervalMs;
+}
+
 static bool initI2sAudioLoopback() {
   i2s_config_t i2sConfig{};
   i2sConfig.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX);
@@ -290,16 +302,30 @@ void setup() {
 }
 
 void loop() {
+  bool audioForwarded = false;
   if (audioLoopbackReady) {
-    int32_t audioBuffer[128];
     size_t bytesRead = 0;
-    if (i2s_read(AUDIO_I2S_PORT, audioBuffer, sizeof(audioBuffer), &bytesRead, 0) == ESP_OK &&
+    const TickType_t i2sTimeoutTicks = pdMS_TO_TICKS(AUDIO_I2S_IO_TIMEOUT_MS);
+    if (i2s_read(AUDIO_I2S_PORT, audioLoopbackBuffer, sizeof(audioLoopbackBuffer), &bytesRead, i2sTimeoutTicks) ==
+            ESP_OK &&
         bytesRead > 0) {
       size_t bytesWritten = 0;
-      i2s_write(AUDIO_I2S_PORT, audioBuffer, bytesRead, &bytesWritten, 0);
+      const esp_err_t writeErr =
+          i2s_write(AUDIO_I2S_PORT, audioLoopbackBuffer, bytesRead, &bytesWritten, i2sTimeoutTicks);
+      if (writeErr == ESP_OK) {
+        audioForwarded = true;
+      } else {
+        static uint32_t lastWriteErrLogMs = 0;
+        const uint32_t now = millis();
+        if (hasElapsedMs(now, lastWriteErrLogMs, AUDIO_ERROR_LOG_INTERVAL_MS)) {
+          lastWriteErrLogMs = now;
+          tftLogf("[I2S] write failed: %d", static_cast<int>(writeErr));
+        }
+      }
     }
   }
 
   ota.loop();
-  delay(10);
+  // Sleep longer when no audio chunk is forwarded to avoid tight polling.
+  delay(audioForwarded ? AUDIO_ACTIVE_DELAY_MS : AUDIO_IDLE_DELAY_MS);
 }
