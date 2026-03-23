@@ -3,6 +3,7 @@
 #include <TFT_eSPI.h>
 #include <SafeGithubOTA.h>
 #include <SGO_Provisioning.h>
+#include <driver/i2s.h>
 #include "secrets.h"
 #include <cstring>
 #include <cstdarg>
@@ -21,6 +22,12 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
 static const uint8_t WIFI_CONNECT_RETRIES = 2;
+static const i2s_port_t AUDIO_I2S_PORT = I2S_NUM_0;
+static const int AUDIO_I2S_BCK_PIN = 9;
+static const int AUDIO_I2S_WS_PIN = 14;
+static const int AUDIO_I2S_DOUT_PIN = 8; // ESP32-S3 -> MAX98357A DIN
+static const int AUDIO_I2S_DIN_PIN = 4;  // INMP441 SD -> ESP32-S3
+static bool audioLoopbackReady = false;
 
 TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
 SafeGithubOTA ota;
@@ -179,11 +186,59 @@ static bool connectWifiWithTimeout() {
   return false;
 }
 
+static bool initI2sAudioLoopback() {
+  i2s_config_t i2sConfig{};
+  i2sConfig.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX);
+  i2sConfig.sample_rate = 16000;
+  i2sConfig.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
+  i2sConfig.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  i2sConfig.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+  i2sConfig.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  i2sConfig.dma_buf_count = 6;
+  i2sConfig.dma_buf_len = 256;
+  i2sConfig.use_apll = false;
+  i2sConfig.tx_desc_auto_clear = true;
+  i2sConfig.fixed_mclk = 0;
+
+  i2s_pin_config_t pinConfig{};
+  pinConfig.bck_io_num = AUDIO_I2S_BCK_PIN;
+  pinConfig.ws_io_num = AUDIO_I2S_WS_PIN;
+  pinConfig.data_out_num = AUDIO_I2S_DOUT_PIN;
+  pinConfig.data_in_num = AUDIO_I2S_DIN_PIN;
+
+  i2s_driver_uninstall(AUDIO_I2S_PORT);
+
+  esp_err_t err = i2s_driver_install(AUDIO_I2S_PORT, &i2sConfig, 0, nullptr);
+  if (err != ESP_OK) {
+    tftLogf("[I2S] driver install failed: %d", static_cast<int>(err));
+    return false;
+  }
+
+  err = i2s_set_pin(AUDIO_I2S_PORT, &pinConfig);
+  if (err != ESP_OK) {
+    tftLogf("[I2S] pin config failed: %d", static_cast<int>(err));
+    i2s_driver_uninstall(AUDIO_I2S_PORT);
+    return false;
+  }
+
+  err = i2s_zero_dma_buffer(AUDIO_I2S_PORT);
+  if (err != ESP_OK) {
+    tftLogf("[I2S] dma clear failed: %d", static_cast<int>(err));
+    i2s_driver_uninstall(AUDIO_I2S_PORT);
+    return false;
+  }
+
+  tftLogf("[I2S] Ready: INMP441 + MAX98357A");
+  tftLogf("[I2S] %dHz 32-bit mono loopback", i2sConfig.sample_rate);
+  return true;
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
   tftInitUi();
   tftLogf("[BOOT] FW version: %s", FW_VERSION);
+  audioLoopbackReady = initI2sAudioLoopback();
 
   ota.setVersion(FW_VERSION);
   ota.setAutoCheckInterval(6 * 60 * 60); // check every 6 hours
@@ -235,6 +290,16 @@ void setup() {
 }
 
 void loop() {
+  if (audioLoopbackReady) {
+    int32_t audioBuffer[128];
+    size_t bytesRead = 0;
+    if (i2s_read(AUDIO_I2S_PORT, audioBuffer, sizeof(audioBuffer), &bytesRead, 0) == ESP_OK &&
+        bytesRead > 0) {
+      size_t bytesWritten = 0;
+      i2s_write(AUDIO_I2S_PORT, audioBuffer, bytesRead, &bytesWritten, 0);
+    }
+  }
+
   ota.loop();
-  delay(50);
+  delay(10);
 }

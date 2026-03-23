@@ -5,6 +5,21 @@ Project STATUS:
     V3 WORK in PROGRESS!
     SD and TFT Completed!
 
+## I2S Dual Device Test (INMP441 + MAX98357A)
+
+For testing both I2S devices together, the firmware now initializes one shared I2S bus and runs a basic mic-to-speaker loopback:
+
+- INMP441 microphone input (RX)
+- MAX98357A amplifier output (TX)
+
+Current test configuration in `src/main.cpp`:
+
+- Port: `I2S_NUM_0`
+- Sample rate: `16000`
+- Format: `32-bit`, `mono (left channel)`
+
+Pin mapping is documented in `PIN-CONNECTIONS.md`.
+
 ## GitHub OTA (SafeGithubOTA library)
 
 This project uses `gibz104/SafeGithubOTA` for OTA updates from GitHub Releases.
