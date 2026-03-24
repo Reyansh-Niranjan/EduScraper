@@ -4,14 +4,11 @@
 #include <WiFi.h>
 #include <SGO_Provisioning.h>
 #include "secrets.h"
+#include "defs.h"
 
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
-
-#ifndef FW_VERSION
-#define FW_VERSION "0.0.1"
-#endif
 
 #ifndef OTA_GITHUB_PAT
 #define OTA_GITHUB_PAT ""

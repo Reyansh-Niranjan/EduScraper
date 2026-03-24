@@ -6,30 +6,15 @@
 #include <cstdarg>
 #include <cstdio>
 #include "ota_service.h"
+#include "defs.h"
 
 // Required by SafeGithubOTA for TLS + JSON parsing on ESP32 loop task.
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
-
-#ifndef FW_VERSION
-#define FW_VERSION "0.0.1"
-#endif
 
 TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
 OtaService ota;
 
 static int logCursorY = 86;
-static const int LOG_LINE_HEIGHT = 18;
-
-// ESP32 filesystem root (/) corresponds to SD card root (D:\ style on PC).
-static constexpr const char *SPLASH_IMAGE_PATH = "/assets/R2_Reyansh-LOGO.jpg";
-static constexpr uint16_t SPLASH_BG = TFT_BLACK;
-static constexpr uint16_t SPLASH_BAR_BG = TFT_DARKGREY;
-static constexpr uint16_t SPLASH_BAR_FG = TFT_CYAN;
-static constexpr uint16_t SPLASH_LOG_COLOR = TFT_WHITE;
-static constexpr uint32_t SPLASH_MIN_LOADING_MS = 1500;
-static constexpr uint32_t SPLASH_LOG_STEP_MS = 280;
-static constexpr size_t SPLASH_LOG_QUEUE_SIZE = 36;
-static constexpr size_t SPLASH_LOG_TEXT_MAX = 128;
 
 static int splashImageX = 0;
 static int splashImageCenterY = 0;
@@ -37,7 +22,7 @@ static uint16_t splashImageW = 0;
 static uint16_t splashImageH = 0;
 static bool splashImageReady = false;
 
-static char splashLogQueue[SPLASH_LOG_QUEUE_SIZE][SPLASH_LOG_TEXT_MAX];
+static char splashLogQueue[AppDefs::SPLASH_LOG_QUEUE_SIZE][AppDefs::SPLASH_LOG_TEXT_MAX];
 static size_t splashLogHead = 0;
 static size_t splashLogTail = 0;
 static size_t splashLogCount = 0;
@@ -47,14 +32,14 @@ static void queueSplashLog(const char *line) {
     return;
   }
 
-  if (splashLogCount == SPLASH_LOG_QUEUE_SIZE) {
-    splashLogTail = (splashLogTail + 1) % SPLASH_LOG_QUEUE_SIZE;
+  if (splashLogCount == AppDefs::SPLASH_LOG_QUEUE_SIZE) {
+    splashLogTail = (splashLogTail + 1) % AppDefs::SPLASH_LOG_QUEUE_SIZE;
     splashLogCount--;
   }
 
-  strncpy(splashLogQueue[splashLogHead], line, SPLASH_LOG_TEXT_MAX - 1);
-  splashLogQueue[splashLogHead][SPLASH_LOG_TEXT_MAX - 1] = '\0';
-  splashLogHead = (splashLogHead + 1) % SPLASH_LOG_QUEUE_SIZE;
+  strncpy(splashLogQueue[splashLogHead], line, AppDefs::SPLASH_LOG_TEXT_MAX - 1);
+  splashLogQueue[splashLogHead][AppDefs::SPLASH_LOG_TEXT_MAX - 1] = '\0';
+  splashLogHead = (splashLogHead + 1) % AppDefs::SPLASH_LOG_QUEUE_SIZE;
   splashLogCount++;
 }
 
@@ -69,7 +54,7 @@ static bool popSplashLog(char *out, size_t outSize) {
 
   strncpy(out, splashLogQueue[splashLogTail], outSize - 1);
   out[outSize - 1] = '\0';
-  splashLogTail = (splashLogTail + 1) % SPLASH_LOG_QUEUE_SIZE;
+  splashLogTail = (splashLogTail + 1) % AppDefs::SPLASH_LOG_QUEUE_SIZE;
   splashLogCount--;
   return true;
 }
@@ -102,7 +87,7 @@ static uint16_t blend565(uint16_t from, uint16_t to, uint8_t amount) {
 
 static void splashDrawImageAt(int y) {
   if (splashImageReady) {
-    TJpgDec.drawSdJpg(splashImageX, y, SPLASH_IMAGE_PATH);
+    TJpgDec.drawSdJpg(splashImageX, y, AppDefs::SPLASH_IMAGE_PATH);
     return;
   }
 
@@ -111,7 +96,7 @@ static void splashDrawImageAt(int y) {
   const int x = (tft.width() - fallbackW) / 2;
   tft.fillRoundRect(x, y, fallbackW, fallbackH, 10, TFT_DARKGREY);
   tft.drawRoundRect(x, y, fallbackW, fallbackH, 10, TFT_WHITE);
-  tft.setTextColor(TFT_WHITE, SPLASH_BG);
+  tft.setTextColor(TFT_WHITE, AppDefs::SPLASH_BG);
   tft.setFreeFont(&FreeSansBold9pt7b);
   tft.setCursor(x + 16, y + (fallbackH / 2));
   tft.print("Logo missing");
@@ -122,9 +107,9 @@ static void splashDrawFrame(int imageY,
                             const char *logLine,
                             bool showLoading,
                             uint8_t fade) {
-  tft.fillScreen(SPLASH_BG);
+  tft.fillScreen(AppDefs::SPLASH_BG);
 
-  tft.setTextColor(blend565(TFT_LIGHTGREY, SPLASH_BG, fade), SPLASH_BG);
+  tft.setTextColor(blend565(TFT_LIGHTGREY, AppDefs::SPLASH_BG, fade), AppDefs::SPLASH_BG);
   tft.setFreeFont(&FreeSans9pt7b);
   tft.setCursor((tft.width() / 2) - 36, 26);
   tft.print("Made By");
@@ -139,9 +124,9 @@ static void splashDrawFrame(int imageY,
   const int barH = 12;
   const int barX = 20;
   const int barY = tft.height() - 72;
-  const uint16_t bg = blend565(SPLASH_BAR_BG, SPLASH_BG, fade);
-  const uint16_t fg = blend565(SPLASH_BAR_FG, SPLASH_BG, fade);
-  const uint16_t border = blend565(TFT_WHITE, SPLASH_BG, fade);
+  const uint16_t bg = blend565(AppDefs::SPLASH_BAR_BG, AppDefs::SPLASH_BG, fade);
+  const uint16_t fg = blend565(AppDefs::SPLASH_BAR_FG, AppDefs::SPLASH_BG, fade);
+  const uint16_t border = blend565(TFT_WHITE, AppDefs::SPLASH_BG, fade);
 
   tft.fillRoundRect(barX, barY, barW, barH, 6, bg);
   const int fillW = (barW * progress) / 100;
@@ -151,7 +136,7 @@ static void splashDrawFrame(int imageY,
   tft.drawRoundRect(barX - 1, barY - 1, barW + 2, barH + 2, 7, border);
 
   if (logLine != nullptr) {
-    tft.setTextColor(blend565(SPLASH_LOG_COLOR, SPLASH_BG, fade), SPLASH_BG);
+    tft.setTextColor(blend565(AppDefs::SPLASH_LOG_COLOR, AppDefs::SPLASH_BG, fade), AppDefs::SPLASH_BG);
     tft.setFreeFont(&FreeSans9pt7b);
     tft.setCursor(14, barY + 34);
     tft.print(logLine);
@@ -159,13 +144,18 @@ static void splashDrawFrame(int imageY,
 }
 
 static void runSplashSequence() {
-  tft.fillScreen(SPLASH_BG);
+  tft.fillScreen(AppDefs::SPLASH_BG);
 
-  if (SD.begin()) {
+  pinMode(TFT_CS, OUTPUT);
+  digitalWrite(TFT_CS, HIGH);
+  pinMode(AppDefs::SD_CS_PIN, OUTPUT);
+  digitalWrite(AppDefs::SD_CS_PIN, HIGH);
+
+  if (SD.begin(AppDefs::SD_CS_PIN)) {
     TJpgDec.setJpgScale(1);
     TJpgDec.setSwapBytes(true);
     TJpgDec.setCallback(tftJpgOutput);
-    splashImageReady = TJpgDec.getSdJpgSize(&splashImageW, &splashImageH, SPLASH_IMAGE_PATH);
+    splashImageReady = TJpgDec.getSdJpgSize(&splashImageW, &splashImageH, AppDefs::SPLASH_IMAGE_PATH);
   } else {
     splashImageReady = false;
   }
@@ -190,22 +180,22 @@ static void runSplashSequence() {
     delay(26);
   }
 
-  char currentLog[SPLASH_LOG_TEXT_MAX] = "[BOOT] Starting OTA";
+  char currentLog[AppDefs::SPLASH_LOG_TEXT_MAX] = "[BOOT] Starting OTA";
   uint8_t progress = 4;
   const uint32_t loadStartMs = millis();
   uint32_t lastLogDrawMs = 0;
 
-  while (!ota.isSetupAndCheckDone() || (millis() - loadStartMs) < SPLASH_MIN_LOADING_MS) {
+  while (!ota.isSetupAndCheckDone() || (millis() - loadStartMs) < AppDefs::SPLASH_MIN_LOADING_MS) {
     ota.stepSetupAndCheckAsync();
     ota.loop();
 
-    char nextLog[SPLASH_LOG_TEXT_MAX];
+    char nextLog[AppDefs::SPLASH_LOG_TEXT_MAX];
     if (popSplashLog(nextLog, sizeof(nextLog))) {
       strncpy(currentLog, nextLog, sizeof(currentLog) - 1);
       currentLog[sizeof(currentLog) - 1] = '\0';
     }
 
-    if (millis() - lastLogDrawMs >= SPLASH_LOG_STEP_MS) {
+    if (millis() - lastLogDrawMs >= AppDefs::SPLASH_LOG_STEP_MS) {
       lastLogDrawMs = millis();
       if (progress < 92) {
         progress = static_cast<uint8_t>(progress + 3);
@@ -271,12 +261,12 @@ static void tftLogLine(const char *line) {
     logCursorY = 86;
     tft.setCursor(0, logCursorY);
     tft.print("...");
-    logCursorY += LOG_LINE_HEIGHT;
+    logCursorY += AppDefs::LOG_LINE_HEIGHT;
   }
 
   tft.setCursor(0, logCursorY);
   tft.println(line);
-  logCursorY += LOG_LINE_HEIGHT;
+  logCursorY += AppDefs::LOG_LINE_HEIGHT;
 }
 
 static void tftLogf(const char *fmt, ...) {
@@ -307,7 +297,7 @@ void setup() {
   tftInitUi();
   tftLogf("[BOOT] FW version: %s", FW_VERSION);
 
-  char pendingLog[SPLASH_LOG_TEXT_MAX];
+  char pendingLog[AppDefs::SPLASH_LOG_TEXT_MAX];
   while (popSplashLog(pendingLog, sizeof(pendingLog))) {
     tftLogLine(pendingLog);
   }
