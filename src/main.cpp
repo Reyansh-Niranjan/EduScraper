@@ -278,6 +278,15 @@ static void tftLogf(const char *fmt, ...) {
   tftLogLine(line);
 }
 
+static void tftBootProbe() {
+  tft.fillScreen(TFT_NAVY);
+  tft.setTextColor(TFT_WHITE, TFT_NAVY);
+  tft.setFreeFont(&FreeSans9pt7b);
+  tft.setCursor(12, 28);
+  tft.print("Display init OK");
+  delay(220);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -289,9 +298,8 @@ void setup() {
 
   tft.init();
   tft.setRotation(1);
-  tft.writecommand(0x36);
-  tft.writedata(0x40);
   tft.setTextWrap(true, false);
+  tftBootProbe();
 
   runSplashSequence();
   tftInitUi();
