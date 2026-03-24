@@ -1,12 +1,11 @@
 #include <Arduino.h>
-#include <WiFi.h>
 #include <TFT_eSPI.h>
-#include <SafeGithubOTA.h>
-#include <SGO_Provisioning.h>
-#include "secrets.h"
+#include <TJpg_Decoder.h>
+#include <SD.h>
 #include <cstring>
 #include <cstdarg>
 #include <cstdio>
+#include "ota_service.h"
 
 // Required by SafeGithubOTA for TLS + JSON parsing on ESP32 loop task.
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
@@ -15,24 +14,235 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 #define FW_VERSION "0.0.1"
 #endif
 
-#ifndef OTA_GITHUB_PAT
-#define OTA_GITHUB_PAT ""
-#endif
-
-static const uint32_t WIFI_CONNECT_TIMEOUT_MS = 20000;
-static const uint8_t WIFI_CONNECT_RETRIES = 2;
-
 TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
-SafeGithubOTA ota;
+OtaService ota;
 
 static int logCursorY = 86;
 static const int LOG_LINE_HEIGHT = 18;
 
+// ESP32 filesystem root (/) corresponds to SD card root (D:\ style on PC).
+static constexpr const char *SPLASH_IMAGE_PATH = "/assets/R2_Reyansh-LOGO.jpg";
+static constexpr uint16_t SPLASH_BG = TFT_BLACK;
+static constexpr uint16_t SPLASH_BAR_BG = TFT_DARKGREY;
+static constexpr uint16_t SPLASH_BAR_FG = TFT_CYAN;
+static constexpr uint16_t SPLASH_LOG_COLOR = TFT_WHITE;
+static constexpr uint32_t SPLASH_MIN_LOADING_MS = 1500;
+static constexpr uint32_t SPLASH_LOG_STEP_MS = 280;
+static constexpr size_t SPLASH_LOG_QUEUE_SIZE = 36;
+static constexpr size_t SPLASH_LOG_TEXT_MAX = 128;
+
+static int splashImageX = 0;
+static int splashImageCenterY = 0;
+static uint16_t splashImageW = 0;
+static uint16_t splashImageH = 0;
+static bool splashImageReady = false;
+
+static char splashLogQueue[SPLASH_LOG_QUEUE_SIZE][SPLASH_LOG_TEXT_MAX];
+static size_t splashLogHead = 0;
+static size_t splashLogTail = 0;
+static size_t splashLogCount = 0;
+
+static void queueSplashLog(const char *line) {
+  if (line == nullptr || line[0] == '\0') {
+    return;
+  }
+
+  if (splashLogCount == SPLASH_LOG_QUEUE_SIZE) {
+    splashLogTail = (splashLogTail + 1) % SPLASH_LOG_QUEUE_SIZE;
+    splashLogCount--;
+  }
+
+  strncpy(splashLogQueue[splashLogHead], line, SPLASH_LOG_TEXT_MAX - 1);
+  splashLogQueue[splashLogHead][SPLASH_LOG_TEXT_MAX - 1] = '\0';
+  splashLogHead = (splashLogHead + 1) % SPLASH_LOG_QUEUE_SIZE;
+  splashLogCount++;
+}
+
+static bool popSplashLog(char *out, size_t outSize) {
+  if (out == nullptr || outSize == 0) {
+    return false;
+  }
+
+  if (splashLogCount == 0) {
+    return false;
+  }
+
+  strncpy(out, splashLogQueue[splashLogTail], outSize - 1);
+  out[outSize - 1] = '\0';
+  splashLogTail = (splashLogTail + 1) % SPLASH_LOG_QUEUE_SIZE;
+  splashLogCount--;
+  return true;
+}
+
+static void otaLogRouter(const char *line) {
+  queueSplashLog(line);
+}
+
+static bool tftJpgOutput(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bitmap) {
+  if (y >= tft.height() || x >= tft.width()) {
+    return 0;
+  }
+  tft.pushImage(x, y, w, h, bitmap);
+  return 1;
+}
+
+static uint16_t blend565(uint16_t from, uint16_t to, uint8_t amount) {
+  const uint8_t fr = (from >> 11) & 0x1F;
+  const uint8_t fg = (from >> 5) & 0x3F;
+  const uint8_t fb = from & 0x1F;
+  const uint8_t tr = (to >> 11) & 0x1F;
+  const uint8_t tg = (to >> 5) & 0x3F;
+  const uint8_t tb = to & 0x1F;
+
+  const uint8_t rr = fr + ((tr - fr) * amount) / 255;
+  const uint8_t rg = fg + ((tg - fg) * amount) / 255;
+  const uint8_t rb = fb + ((tb - fb) * amount) / 255;
+  return static_cast<uint16_t>((rr << 11) | (rg << 5) | rb);
+}
+
+static void splashDrawImageAt(int y) {
+  if (splashImageReady) {
+    TJpgDec.drawSdJpg(splashImageX, y, SPLASH_IMAGE_PATH);
+    return;
+  }
+
+  const int fallbackW = 180;
+  const int fallbackH = 90;
+  const int x = (tft.width() - fallbackW) / 2;
+  tft.fillRoundRect(x, y, fallbackW, fallbackH, 10, TFT_DARKGREY);
+  tft.drawRoundRect(x, y, fallbackW, fallbackH, 10, TFT_WHITE);
+  tft.setTextColor(TFT_WHITE, SPLASH_BG);
+  tft.setFreeFont(&FreeSansBold9pt7b);
+  tft.setCursor(x + 16, y + (fallbackH / 2));
+  tft.print("Logo missing");
+}
+
+static void splashDrawFrame(int imageY,
+                            uint8_t progress,
+                            const char *logLine,
+                            bool showLoading,
+                            uint8_t fade) {
+  tft.fillScreen(SPLASH_BG);
+
+  tft.setTextColor(blend565(TFT_LIGHTGREY, SPLASH_BG, fade), SPLASH_BG);
+  tft.setFreeFont(&FreeSans9pt7b);
+  tft.setCursor((tft.width() / 2) - 36, 26);
+  tft.print("Made By");
+
+  splashDrawImageAt(imageY);
+
+  if (!showLoading) {
+    return;
+  }
+
+  const int barW = tft.width() - 40;
+  const int barH = 12;
+  const int barX = 20;
+  const int barY = tft.height() - 72;
+  const uint16_t bg = blend565(SPLASH_BAR_BG, SPLASH_BG, fade);
+  const uint16_t fg = blend565(SPLASH_BAR_FG, SPLASH_BG, fade);
+  const uint16_t border = blend565(TFT_WHITE, SPLASH_BG, fade);
+
+  tft.fillRoundRect(barX, barY, barW, barH, 6, bg);
+  const int fillW = (barW * progress) / 100;
+  if (fillW > 0) {
+    tft.fillRoundRect(barX, barY, fillW, barH, 6, fg);
+  }
+  tft.drawRoundRect(barX - 1, barY - 1, barW + 2, barH + 2, 7, border);
+
+  if (logLine != nullptr) {
+    tft.setTextColor(blend565(SPLASH_LOG_COLOR, SPLASH_BG, fade), SPLASH_BG);
+    tft.setFreeFont(&FreeSans9pt7b);
+    tft.setCursor(14, barY + 34);
+    tft.print(logLine);
+  }
+}
+
+static void runSplashSequence() {
+  tft.fillScreen(SPLASH_BG);
+
+  if (SD.begin()) {
+    TJpgDec.setJpgScale(1);
+    TJpgDec.setSwapBytes(true);
+    TJpgDec.setCallback(tftJpgOutput);
+    splashImageReady = TJpgDec.getSdJpgSize(&splashImageW, &splashImageH, SPLASH_IMAGE_PATH);
+  } else {
+    splashImageReady = false;
+  }
+
+  if (!splashImageReady) {
+    splashImageW = 180;
+    splashImageH = 90;
+  }
+
+  splashImageX = (tft.width() - splashImageW) / 2;
+  splashImageCenterY = (tft.height() - splashImageH) / 2 - 10;
+
+  splashDrawFrame(splashImageCenterY, 0, nullptr, false, 0);
+  delay(500);
+
+  const int upTargetY = splashImageCenterY - 26;
+  for (int i = 0; i <= 14; ++i) {
+    const float t = static_cast<float>(i) / 14.0f;
+    const float eased = t * t * (3.0f - 2.0f * t);
+    const int y = splashImageCenterY - static_cast<int>((splashImageCenterY - upTargetY) * eased);
+    splashDrawFrame(y, 0, nullptr, false, 0);
+    delay(26);
+  }
+
+  char currentLog[SPLASH_LOG_TEXT_MAX] = "[BOOT] Starting OTA";
+  uint8_t progress = 4;
+  const uint32_t loadStartMs = millis();
+  uint32_t lastLogDrawMs = 0;
+
+  while (!ota.isSetupAndCheckDone() || (millis() - loadStartMs) < SPLASH_MIN_LOADING_MS) {
+    ota.stepSetupAndCheckAsync();
+    ota.loop();
+
+    char nextLog[SPLASH_LOG_TEXT_MAX];
+    if (popSplashLog(nextLog, sizeof(nextLog))) {
+      strncpy(currentLog, nextLog, sizeof(currentLog) - 1);
+      currentLog[sizeof(currentLog) - 1] = '\0';
+    }
+
+    if (millis() - lastLogDrawMs >= SPLASH_LOG_STEP_MS) {
+      lastLogDrawMs = millis();
+      if (progress < 92) {
+        progress = static_cast<uint8_t>(progress + 3);
+      }
+      splashDrawFrame(upTargetY, progress, currentLog, true, 0);
+    }
+
+    delay(20);
+  }
+
+  if (ota.isSetupAndCheckSuccessful()) {
+    strncpy(currentLog, "[BOOT] OTA ready", sizeof(currentLog) - 1);
+  } else {
+    strncpy(currentLog, "[BOOT] OTA setup failed", sizeof(currentLog) - 1);
+  }
+  currentLog[sizeof(currentLog) - 1] = '\0';
+  splashDrawFrame(upTargetY, 100, currentLog, true, 0);
+  delay(350);
+
+  for (int i = 0; i <= 8; ++i) {
+    const uint8_t fade = static_cast<uint8_t>((i * 255) / 8);
+    splashDrawFrame(upTargetY, 100, currentLog, true, fade);
+    delay(45);
+  }
+
+  for (int i = 0; i <= 14; ++i) {
+    const float t = static_cast<float>(i) / 14.0f;
+    const float eased = t * t * (3.0f - 2.0f * t);
+    const int y = upTargetY + static_cast<int>((splashImageCenterY - upTargetY) * eased);
+    splashDrawFrame(y, 100, nullptr, false, 255);
+    delay(24);
+  }
+
+  tft.fillScreen(TFT_BLACK);
+}
+
 static void tftInitUi() {
-  tft.init();
-  tft.setRotation(1);
-  tft.writecommand(0x36);
-  tft.writedata(0x40);
   tft.fillScreen(TFT_BLACK);
   tft.setTextWrap(true, false);
 
@@ -51,12 +261,10 @@ static void tftInitUi() {
   logCursorY = 86;
 }
 
-static void tftLogf(const char *fmt, ...) {
-  char line[128];
-  va_list args;
-  va_start(args, fmt);
-  vsnprintf(line, sizeof(line), fmt, args);
-  va_end(args);
+static void tftLogLine(const char *line) {
+  if (line == nullptr) {
+    return;
+  }
 
   if (logCursorY > tft.height() - 8) {
     tft.fillRect(0, 70, tft.width(), tft.height() - 70, TFT_BLACK);
@@ -71,167 +279,44 @@ static void tftLogf(const char *fmt, ...) {
   logCursorY += LOG_LINE_HEIGHT;
 }
 
-static void copyBounded(char* dst, size_t dstSize, const char* src) {
-  if (dst == nullptr || dstSize == 0) {
-    return;
-  }
-
-  if (src == nullptr) {
-    dst[0] = '\0';
-    return;
-  }
-
-  strncpy(dst, src, dstSize - 1);
-  dst[dstSize - 1] = '\0';
-}
-
-static bool credentialsDiffer(const SGO_Credentials& a, const SGO_Credentials& b) {
-  return strcmp(a.owner, b.owner) != 0 || strcmp(a.repo, b.repo) != 0 ||
-         strcmp(a.pat, b.pat) != 0 || strcmp(a.binFilename, b.binFilename) != 0;
-}
-
-static bool provisionFromSecrets() {
-  tftLogf("[BOOT] Loading OTA config");
-
-  SGO_Credentials desired{};
-  copyBounded(desired.owner, sizeof(desired.owner), OTA_GITHUB_OWNER);
-  copyBounded(desired.repo, sizeof(desired.repo), OTA_GITHUB_REPO);
-  copyBounded(desired.pat, sizeof(desired.pat), OTA_GITHUB_PAT);
-  copyBounded(desired.binFilename, sizeof(desired.binFilename), OTA_BIN_FILENAME);
-
-  tftLogf("[BOOT] Repo: %s/%s", desired.owner, desired.repo);
-  tftLogf("[BOOT] Asset: %s", desired.binFilename);
-  tftLogf("[BOOT] PAT: %s", (desired.pat[0] == '\0') ? "empty" : "set");
-
-  if (desired.owner[0] == '\0' || desired.repo[0] == '\0' || desired.binFilename[0] == '\0') {
-    tftLogf("[ERR] OTA_GITHUB_* incomplete");
-    return false;
-  }
-
-  SGO_Credentials current{};
-  const bool hasCurrent = SGO_Provisioning::loadCredentials(current);
-  if (hasCurrent && !credentialsDiffer(current, desired)) {
-    tftLogf("[BOOT] OTA credentials already synced");
-    return true;
-  }
-
-  if (!SGO_Provisioning::saveCredentials(desired)) {
-    tftLogf("[ERR] Failed writing OTA credentials");
-    return false;
-  }
-
-  tftLogf("[BOOT] OTA credentials saved");
-  return true;
-}
-
-static bool connectWifiWithTimeout() {
-  auto wifiStatusText = [](wl_status_t status) -> const char * {
-    switch (status) {
-    case WL_IDLE_STATUS:
-      return "IDLE";
-    case WL_NO_SSID_AVAIL:
-      return "NO SSID";
-    case WL_SCAN_COMPLETED:
-      return "SCAN DONE";
-    case WL_CONNECTED:
-      return "CONNECTED";
-    case WL_CONNECT_FAILED:
-      return "CONNECT FAILED";
-    case WL_CONNECTION_LOST:
-      return "CONNECTION LOST";
-    case WL_DISCONNECTED:
-      return "DISCONNECTED";
-    default:
-      return "UNKNOWN";
-    }
-  };
-
-  WiFi.mode(WIFI_STA);
-
-  for (uint8_t attempt = 1; attempt <= WIFI_CONNECT_RETRIES; ++attempt) {
-    tftLogf("[WIFI] Attempt %u/%u", attempt, WIFI_CONNECT_RETRIES);
-    tftLogf("[WIFI] Connecting to: %s", WIFI_SSID);
-
-    WiFi.disconnect(true);
-    delay(150);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    const uint32_t startMs = millis();
-    uint32_t lastProgressMs = 0;
-    while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < WIFI_CONNECT_TIMEOUT_MS) {
-      delay(250);
-      if (millis() - lastProgressMs >= 3000) {
-        lastProgressMs = millis();
-        tftLogf("[WIFI] waiting... %lus", (millis() - startMs) / 1000UL);
-      }
-    }
-
-    if (WiFi.status() == WL_CONNECTED) {
-      return true;
-    }
-
-    tftLogf("[WIFI] Attempt failed: %s (%d)",
-            wifiStatusText(WiFi.status()),
-            static_cast<int>(WiFi.status()));
-  }
-
-  tftLogf("[WIFI] HINT: verify SSID/password and 2.4GHz signal");
-  return false;
+static void tftLogf(const char *fmt, ...) {
+  char line[128];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(line, sizeof(line), fmt, args);
+  va_end(args);
+  tftLogLine(line);
 }
 
 void setup() {
   Serial.begin(115200);
   delay(200);
+
+  // Begin OTA startup before splash; progress is advanced cooperatively during loading.
+  ota.setLogCallback(otaLogRouter);
+  queueSplashLog("[BOOT] OTA startup queued");
+  ota.beginSetupAndCheckAsync();
+
+  tft.init();
+  tft.setRotation(1);
+  tft.writecommand(0x36);
+  tft.writedata(0x40);
+  tft.setTextWrap(true, false);
+
+  runSplashSequence();
   tftInitUi();
   tftLogf("[BOOT] FW version: %s", FW_VERSION);
 
-  ota.setVersion(FW_VERSION);
-  ota.setAutoCheckInterval(6 * 60 * 60); // check every 6 hours
-  tftLogf("[OTA] Auto-check: 6 hours");
-
-  ota.onLog([](const char *message) {
-    tftLogf("[OTA] %s", message);
-  });
-
-  ota.onProgress([](uint32_t written, uint32_t total) {
-    if (total == 0) {
-      return;
-    }
-    static uint8_t lastPct = 0;
-    const uint8_t pct = static_cast<uint8_t>((written * 100U) / total);
-    if (pct >= lastPct + 10 || pct == 100) {
-      lastPct = pct;
-      tftLogf("[OTA] Progress: %u%%", pct);
-    }
-  });
-
-  if (!provisionFromSecrets()) {
-    tftLogf("[BOOT] Stop: OTA config error");
-    return;
+  char pendingLog[SPLASH_LOG_TEXT_MAX];
+  while (popSplashLog(pendingLog, sizeof(pendingLog))) {
+    tftLogLine(pendingLog);
   }
 
-  if (!connectWifiWithTimeout()) {
-    tftLogf("[ERR] Wi-Fi failed, status: %d", WiFi.status());
-    return;
+  if (!ota.isSetupAndCheckSuccessful()) {
+    tftLogLine("[BOOT] OTA init did not complete successfully");
   }
 
-  tftLogf("[WIFI] Connected");
-  tftLogf("[WIFI] IP: %s", WiFi.localIP().toString().c_str());
-  tftLogf("[WIFI] RSSI: %d dBm", WiFi.RSSI());
-  tftLogf("[OTA] Initializing");
-  const SGO_Error beginErr = ota.begin();
-  tftLogf("[OTA] begin(): %d", static_cast<int>(beginErr));
-  tftLogf("[OTA] begin msg: %s", ota.getLastError());
-
-  if (ota.wasRolledBack()) {
-    tftLogf("[OTA] Rolled back previous FW");
-  }
-
-  tftLogf("[OTA] Checking releases");
-  const SGO_Error checkErr = ota.checkAndUpdate();
-  tftLogf("[OTA] check/update: %d", static_cast<int>(checkErr));
-  tftLogf("[OTA] result msg: %s", ota.getLastError());
-  tftLogf("[BOOT] Setup complete");
+  ota.setLogCallback(tftLogLine);
 }
 
 void loop() {
